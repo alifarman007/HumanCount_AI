@@ -274,10 +274,17 @@ def enumerate_webcams(max_devices: int = 5) -> list:
     Returns:
         List of (device_id, name) tuples
     """
+    import os
+    
+    # Suppress OpenCV warnings temporarily
+    os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+    
     devices = []
     for i in range(max_devices):
-        cap = cv2.VideoCapture(i)
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # DirectShow for Windows
         if cap.isOpened():
+            # Try to get actual camera name (Windows)
             devices.append((i, f"Camera {i}"))
             cap.release()
+    
     return devices

@@ -162,10 +162,18 @@ class YOLODetector:
             conf = float(boxes.conf[i].cpu().numpy())
             
             # Get track ID if tracking
-            if with_tracking and boxes.id is not None:
-                track_id = int(boxes.id[i].cpu().numpy())
+            if with_tracking:
+                if boxes.id is not None and i < len(boxes.id):
+                    track_id = int(boxes.id[i].cpu().numpy())
+                else:
+                    # Skip detections without track ID (can't be tracked)
+                    continue
             else:
-                track_id = -1  # No tracking
+                track_id = -1  # Detection-only mode
+            
+            # Skip invalid track IDs in tracking mode
+            if with_tracking and track_id < 0:
+                continue
             
             detection = Detection(
                 track_id=track_id,
