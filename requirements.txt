@@ -1,0 +1,18 @@
+# Core
+PySide6>=6.5.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# AI/ML
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Geometry
+shapely>=2.0.0
+
+# Utilities
+jsonschema>=4.0.0
+
+# Development
+pytest>=7.0.0
