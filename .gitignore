@@ -1,3 +1,40 @@
-# Python virtual environment
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
 venv/
 .venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# YOLO models (large files)
+*.pt
+*.onnx
+
+# Logs
+logs/*.log
+
+# Saved configs (keep folder but not files)
+saved_configs/*.json
+!saved_configs/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test videos
+*.mp4
+*.avi
+*.mkv
+
+# Build
+dist/
+build/
+*.egg-info/
