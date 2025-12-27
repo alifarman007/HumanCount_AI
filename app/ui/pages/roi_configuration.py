@@ -18,6 +18,7 @@ from app.model.data_structures import (
     LineConfig, DebounceConfig
 )
 
+from app.threads.rtsp_capture_thread import RTSPCaptureThread
 
 class VideoCanvas(QLabel):
     """Widget for displaying video and drawing ROI."""
@@ -230,6 +231,7 @@ class ROIConfigurationPage(PageBase):
         self._model_config = None
         self._module_type = None
         self._cap = None
+        self._rtsp_thread = None
         self._timer = QTimer()
         self._timer.timeout.connect(self._update_frame)
         
@@ -337,34 +339,65 @@ class ROIConfigurationPage(PageBase):
     
     def _start_video(self):
         """Start video capture for preview."""
+        # Stop any existing capture
         if self._cap is not None:
             self._cap.release()
+            self._cap = None
         
-        # Open video source
-        if self._source_config.source_type == "video_file":
-            self._cap = cv2.VideoCapture(self._source_config.path)
-        elif self._source_config.source_type == "rtsp":
-            self._cap = cv2.VideoCapture(self._source_config.path)
-        else:
-            self._cap = cv2.VideoCapture(self._source_config.device_id)
+        if hasattr(self, '_rtsp_thread') and self._rtsp_thread is not None:
+            self._rtsp_thread.stop()
+            self._rtsp_thread = None
         
-        if self._cap.isOpened():
-            self._timer.start(33)  # ~30 fps
+        # Check if RTSP
+        if self._source_config.source_type == "rtsp":
+            # Use threaded RTSP capture
+            from app.threads.rtsp_capture_thread import RTSPCaptureThread
+            
+            self._rtsp_thread = RTSPCaptureThread(
+                rtsp_url=self._source_config.path,
+                target_width=1280,
+                target_height=720
+            )
+            
+            if self._rtsp_thread.start():
+                self._timer.start(33)
+            else:
+                self._canvas.setText(f"Failed to connect: {self._rtsp_thread.error_message}")
         else:
-            self._canvas.setText("Failed to connect to video source")
+            # Use direct capture for webcam/file
+            if self._source_config.source_type == "video_file":
+                self._cap = cv2.VideoCapture(self._source_config.path)
+            else:
+                self._cap = cv2.VideoCapture(self._source_config.device_id)
+            
+            if self._cap.isOpened():
+                self._timer.start(33)
+            else:
+                self._canvas.setText("Failed to connect to video source")
     
     def _update_frame(self):
         """Update video frame."""
-        if self._cap is None or not self._cap.isOpened():
-            return
+        frame = None
         
-        ret, frame = self._cap.read()
-        if ret:
-            self._canvas.set_frame(frame)
+        if self._source_config.source_type == "rtsp":
+            # RTSP mode
+            if hasattr(self, '_rtsp_thread') and self._rtsp_thread:
+                result = self._rtsp_thread.get_frame()
+                if result:
+                    frame, _ = result
         else:
-            # For video files, loop back
-            if self._source_config.source_type == "video_file":
-                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            # Webcam/file mode
+            if self._cap is None or not self._cap.isOpened():
+                return
+            
+            ret, frame = self._cap.read()
+            if not ret:
+                if self._source_config.source_type == "video_file":
+                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                return
+        
+        if frame is not None:
+            self._canvas.set_frame(frame)
     
     def _on_line_drawn(self, p1, p2):
         """Handle line drawn."""
@@ -411,9 +444,14 @@ class ROIConfigurationPage(PageBase):
         
         # Stop video
         self._timer.stop()
+        
         if self._cap:
             self._cap.release()
             self._cap = None
+        
+        if hasattr(self, '_rtsp_thread') and self._rtsp_thread:
+            self._rtsp_thread.stop()
+            self._rtsp_thread = None
         
         # Determine entry direction based on selection
         entry_side = self._canvas.get_entry_side()
@@ -426,7 +464,7 @@ class ROIConfigurationPage(PageBase):
                 id="main_line",
                 p1=p1,
                 p2=p2,
-                entry_direction=entry_side  # "side_a" or "side_b"
+                entry_direction=entry_side
             )],
             debounce=DebounceConfig(
                 hysteresis_distance=25,
@@ -447,3 +485,7 @@ class ROIConfigurationPage(PageBase):
         """Handle page hidden."""
         super().hideEvent(event)
         self._timer.stop()
+        
+        if hasattr(self, '_rtsp_thread') and self._rtsp_thread:
+            self._rtsp_thread.stop()
+            self._rtsp_thread = None

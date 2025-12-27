@@ -1,23 +1,23 @@
 """
 Counting Page - Main counting display with video overlay and stats.
+Optimized for RTSP streams with threaded capture.
 """
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QFrame, QGridLayout, QMessageBox
+    QPushButton, QFrame, QMessageBox
 )
-from PySide6.QtCore import Signal, Qt, QTimer, Slot
+from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap, QFont
 import cv2
 import numpy as np
-import time
 import math
+import time
 
 from app.ui.pages.page_base import PageBase
-from app.model.data_structures import AppConfiguration, CountDirection
-from app.model.video_source import VideoSource
+from app.model.data_structures import AppConfiguration
 from app.model.detector import YOLODetector
-from app.model.track_manager import TrackManager
+from app.threads.rtsp_capture_thread import RTSPCaptureThread
 
 
 class CountDisplay(QFrame):
@@ -43,23 +43,24 @@ class CountDisplay(QFrame):
     def _setup_ui(self):
         """Setup the UI."""
         layout = QVBoxLayout(self)
-        layout.setSpacing(15)
+        layout.setSpacing(10)
         
         # Title
         title = QLabel("LIVE COUNT")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
+        title.setFont(QFont("Arial", 12, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #00d4ff;")
         layout.addWidget(title)
         
         # Entry count
         entry_frame = QFrame()
-        entry_frame.setStyleSheet("background-color: #0f3d0f; border-radius: 8px; padding: 10px;")
+        entry_frame.setStyleSheet("background-color: #0f3d0f; border-radius: 8px; padding: 8px;")
         entry_layout = QVBoxLayout(entry_frame)
+        entry_layout.setSpacing(2)
         
         entry_label = QLabel("ENTRY")
         entry_label.setAlignment(Qt.AlignCenter)
-        entry_label.setStyleSheet("color: #90EE90; font-size: 12px;")
+        entry_label.setStyleSheet("color: #90EE90; font-size: 11px;")
         entry_layout.addWidget(entry_label)
         
         self._entry_value = QLabel("0")
@@ -72,12 +73,13 @@ class CountDisplay(QFrame):
         
         # Exit count
         exit_frame = QFrame()
-        exit_frame.setStyleSheet("background-color: #3d0f0f; border-radius: 8px; padding: 10px;")
+        exit_frame.setStyleSheet("background-color: #3d0f0f; border-radius: 8px; padding: 8px;")
         exit_layout = QVBoxLayout(exit_frame)
+        exit_layout.setSpacing(2)
         
         exit_label = QLabel("EXIT")
         exit_label.setAlignment(Qt.AlignCenter)
-        exit_label.setStyleSheet("color: #FFB6C1; font-size: 12px;")
+        exit_label.setStyleSheet("color: #FFB6C1; font-size: 11px;")
         exit_layout.addWidget(exit_label)
         
         self._exit_value = QLabel("0")
@@ -96,10 +98,11 @@ class CountDisplay(QFrame):
         
         # Inside count
         inside_frame = QFrame()
-        inside_frame.setStyleSheet("background-color: #1a1a3a; border-radius: 8px; padding: 10px;")
+        inside_frame.setStyleSheet("background-color: #1a1a3a; border-radius: 8px; padding: 8px;")
         inside_layout = QVBoxLayout(inside_frame)
+        inside_layout.setSpacing(2)
         
-        inside_label = QLabel("CURRENTLY INSIDE")
+        inside_label = QLabel("INSIDE")
         inside_label.setAlignment(Qt.AlignCenter)
         inside_label.setStyleSheet("color: #aaa; font-size: 11px;")
         inside_layout.addWidget(inside_label)
@@ -114,21 +117,37 @@ class CountDisplay(QFrame):
         
         layout.addStretch()
         
-        # FPS display
+        # Stats display
+        stats_frame = QFrame()
+        stats_frame.setStyleSheet("background-color: #2a2a3a; border-radius: 6px; padding: 6px;")
+        stats_layout = QVBoxLayout(stats_frame)
+        stats_layout.setSpacing(2)
+        
         self._fps_label = QLabel("FPS: --")
         self._fps_label.setAlignment(Qt.AlignCenter)
-        self._fps_label.setStyleSheet("color: #666; font-size: 11px;")
-        layout.addWidget(self._fps_label)
+        self._fps_label.setStyleSheet("color: #888; font-size: 10px;")
+        stats_layout.addWidget(self._fps_label)
+        
+        self._resolution_label = QLabel("Res: --")
+        self._resolution_label.setAlignment(Qt.AlignCenter)
+        self._resolution_label.setStyleSheet("color: #888; font-size: 10px;")
+        stats_layout.addWidget(self._resolution_label)
+        
+        layout.addWidget(stats_frame)
     
-    def update_counts(self, entry: int, exit: int):
+    def update_counts(self, entry: int, exit_count: int):
         """Update the displayed counts."""
         self._entry_value.setText(str(entry))
-        self._exit_value.setText(str(exit))
-        self._inside_value.setText(str(max(0, entry - exit)))
+        self._exit_value.setText(str(exit_count))
+        self._inside_value.setText(str(max(0, entry - exit_count)))
     
     def update_fps(self, fps: float):
         """Update FPS display."""
         self._fps_label.setText(f"FPS: {fps:.1f}")
+    
+    def update_resolution(self, width: int, height: int):
+        """Update resolution display."""
+        self._resolution_label.setText(f"Res: {width}×{height}")
     
     def reset(self):
         """Reset all counts to zero."""
@@ -153,7 +172,7 @@ class VideoDisplay(QLabel):
         """Set line configuration for overlay."""
         self._line_config = line_config
     
-    def update_frame(self, frame, detections, counts, counter):
+    def update_frame(self, frame, detections, counter):
         """Update display with new frame and detections."""
         if frame is None:
             return
@@ -249,16 +268,6 @@ class SimpleCounter:
     
     def __init__(self, line_p1: tuple, line_p2: tuple, entry_side: str = "side_a", 
                  hysteresis: float = 25, cooldown: int = 25):
-        """
-        Initialize counter.
-        
-        Args:
-            line_p1: First point of line (x, y) in pixels
-            line_p2: Second point of line (x, y) in pixels
-            entry_side: Which side is entry ("side_a" or "side_b")
-            hysteresis: Distance from line before side change registers
-            cooldown: Frames to wait before same track can count again
-        """
         self.line_p1 = line_p1
         self.line_p2 = line_p2
         self.entry_side = entry_side
@@ -269,48 +278,29 @@ class SimpleCounter:
         self.exit_count = 0
         self.track_states = {}
         
-        # Calculate line length for distance normalization
         dx = line_p2[0] - line_p1[0]
         dy = line_p2[1] - line_p1[1]
         self.line_length = math.sqrt(dx*dx + dy*dy)
     
     def _cross_product(self, point: tuple) -> float:
-        """
-        Calculate cross product to determine which side of line the point is on.
-        
-        Returns:
-            Positive = "side_a" (left of line direction)
-            Negative = "side_b" (right of line direction)
-        """
         x, y = point
         x1, y1 = self.line_p1
         x2, y2 = self.line_p2
-        
         return (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
     
     def _get_distance_from_line(self, point: tuple) -> float:
-        """Get perpendicular distance from point to line."""
         if self.line_length == 0:
             return 0
         return abs(self._cross_product(point)) / self.line_length
     
     def get_side(self, point: tuple) -> str:
-        """
-        Determine which side of the line a point is on.
-        
-        Returns:
-            "side_a", "side_b", or "center" (within hysteresis zone)
-        """
         distance = self._get_distance_from_line(point)
-        
         if distance < self.hysteresis:
             return "center"
-        
         cross = self._cross_product(point)
         return "side_a" if cross > 0 else "side_b"
     
     def process(self, detections: list) -> list:
-        """Process detections and return crossing events."""
         events = []
         seen_ids = set()
         
@@ -339,14 +329,10 @@ class SimpleCounter:
             previous_side = state["side"]
             
             if previous_side != current_side:
-                # Crossing detected!
-                # Determine if entry or exit based on configured entry_side
                 if previous_side == self.entry_side:
-                    # Moving FROM entry side TO exit side = ENTRY
                     self.entry_count += 1
                     events.append({"track_id": track_id, "direction": "entry"})
                 else:
-                    # Moving FROM exit side TO entry side = EXIT
                     self.exit_count += 1
                     events.append({"track_id": track_id, "direction": "exit"})
                 
@@ -356,7 +342,6 @@ class SimpleCounter:
         return events
     
     def reset(self):
-        """Reset counts and states."""
         self.entry_count = 0
         self.exit_count = 0
         self.track_states.clear()
@@ -369,7 +354,12 @@ class CountingPage(PageBase):
         super().__init__("People Counting", parent)
         
         self._config = None
-        self._cap = None
+        
+        # Video capture (different for RTSP vs webcam/file)
+        self._cap = None  # For webcam/file
+        self._rtsp_thread = None  # For RTSP
+        self._is_rtsp = False
+        
         self._detector = None
         self._counter = None
         self._timer = QTimer()
@@ -378,10 +368,13 @@ class CountingPage(PageBase):
         self._is_running = False
         self._is_paused = False
         
-        # FPS tracking
+        # FPS tracking for YOLO processing
         self._fps_time = time.time()
         self._fps_frames = 0
-        self._fps = 0.0
+        self._process_fps = 0.0
+        
+        # Frame tracking for RTSP
+        self._last_frame_number = -1
         
         self._setup_content()
     
@@ -408,7 +401,9 @@ class CountingPage(PageBase):
         controls_layout = QHBoxLayout()
         
         self._start_btn = QPushButton("▶ Start")
-        self._start_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 8px 16px;")
+        self._start_btn.setStyleSheet(
+            "background-color: #28a745; color: white; font-weight: bold; padding: 8px 16px;"
+        )
         self._start_btn.clicked.connect(self._on_start)
         controls_layout.addWidget(self._start_btn)
         
@@ -435,7 +430,7 @@ class CountingPage(PageBase):
         self._status_label.setStyleSheet("color: #666; padding: 5px;")
         self._content_layout.addWidget(self._status_label)
         
-        # Back button only (no next)
+        # Back button only
         self.add_back_button()
         self.add_button_stretch()
     
@@ -446,6 +441,9 @@ class CountingPage(PageBase):
         # Set line config for video overlay
         if config.roi and config.roi.lines:
             self._video_display.set_line_config(config.roi.lines[0])
+        
+        # Determine if RTSP
+        self._is_rtsp = config.source.source_type == "rtsp"
     
     def _on_start(self):
         """Start counting."""
@@ -456,7 +454,7 @@ class CountingPage(PageBase):
         if self._is_paused:
             # Resume
             self._is_paused = False
-            self._timer.start(33)
+            self._timer.start(10 if self._is_rtsp else 33)
             self._start_btn.setText("▶ Start")
             self._start_btn.setEnabled(False)
             self._pause_btn.setEnabled(True)
@@ -473,49 +471,77 @@ class CountingPage(PageBase):
             QMessageBox.critical(self, "Error", "Failed to load YOLO model.")
             return
         
-        self._status_label.setText("Connecting to video source...")
-        QApplication.processEvents()
+        # Get resolution for counter setup
+        width, height = 1280, 720  # Default for RTSP
         
-        # Open video source
-        if self._config.source.source_type == "video_file":
-            self._cap = cv2.VideoCapture(self._config.source.path)
-        elif self._config.source.source_type == "rtsp":
-            self._cap = cv2.VideoCapture(self._config.source.path)
+        if self._is_rtsp:
+            # === RTSP MODE: Use threaded capture ===
+            self._status_label.setText("Connecting to RTSP stream (720p mode)...")
+            QApplication.processEvents()
+            
+            self._rtsp_thread = RTSPCaptureThread(
+                rtsp_url=self._config.source.path,
+                target_width=1280,
+                target_height=720
+            )
+            
+            if not self._rtsp_thread.start():
+                QMessageBox.critical(
+                    self, "Error", 
+                    f"Failed to connect to RTSP stream:\n{self._rtsp_thread.error_message}"
+                )
+                return
+            
+            # Wait for first frame
+            time.sleep(0.5)
+            
+            width, height = self._rtsp_thread.target_size
+            original_size = self._rtsp_thread.original_size
+            
+            self._status_label.setText(
+                f"RTSP connected: {original_size[0]}×{original_size[1]} → {width}×{height}"
+            )
+            
         else:
-            self._cap = cv2.VideoCapture(self._config.source.device_id)
+            # === WEBCAM/FILE MODE: Use direct capture (unchanged) ===
+            self._status_label.setText("Connecting to video source...")
+            QApplication.processEvents()
+            
+            if self._config.source.source_type == "video_file":
+                self._cap = cv2.VideoCapture(self._config.source.path)
+            else:
+                self._cap = cv2.VideoCapture(self._config.source.device_id)
+            
+            if not self._cap.isOpened():
+                QMessageBox.critical(self, "Error", "Failed to open video source.")
+                return
+            
+            width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        if not self._cap.isOpened():
-            QMessageBox.critical(self, "Error", "Failed to open video source.")
-            return
-        
-        # Get frame dimensions for counter
-        
-        
-        # Initialize counter
-        width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+        # Initialize counter with line from config
         if self._config.roi and self._config.roi.lines:
             line = self._config.roi.lines[0]
-            # Convert normalized coords to pixels
             p1 = (line.p1[0] * width, line.p1[1] * height)
             p2 = (line.p2[0] * width, line.p2[1] * height)
-            entry_side = line.entry_direction  # "side_a" or "side_b"
+            entry_side = line.entry_direction
             
             self._counter = SimpleCounter(
-                line_p1=p1, 
-                line_p2=p2, 
+                line_p1=p1,
+                line_p2=p2,
                 entry_side=entry_side,
-                hysteresis=25, 
+                hysteresis=25,
                 cooldown=25
             )
         else:
-            # Default vertical line in center
             self._counter = SimpleCounter(
                 line_p1=(width // 2, 0),
                 line_p2=(width // 2, height),
                 entry_side="side_a"
             )
+        
+        # Update resolution display
+        self._count_display.update_resolution(width, height)
         
         # Update UI
         self._is_running = True
@@ -526,11 +552,14 @@ class CountingPage(PageBase):
         
         self._fps_time = time.time()
         self._fps_frames = 0
+        self._last_frame_number = -1
         
         self._status_label.setText("Counting in progress...")
         
         # Start processing timer
-        self._timer.start(10)  # Process as fast as possible
+        # RTSP: faster timer since we're just checking for new frames
+        # Webcam/File: 30fps is enough
+        self._timer.start(10 if self._is_rtsp else 33)
     
     def _on_pause(self):
         """Pause counting."""
@@ -559,19 +588,50 @@ class CountingPage(PageBase):
     
     def _process_frame(self):
         """Process a single frame."""
-        if not self._is_running or self._cap is None:
+        if not self._is_running:
             return
         
-        ret, frame = self._cap.read()
+        frame = None
         
-        if not ret:
-            if self._config.source.source_type == "video_file":
-                # Loop video
-                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if self._is_rtsp:
+            # === RTSP MODE ===
+            if self._rtsp_thread is None:
                 return
-            else:
-                self._status_label.setText("Video source disconnected!")
+            
+            result = self._rtsp_thread.get_frame()
+            if result is None:
+                if not self._rtsp_thread.is_connected:
+                    self._status_label.setText("RTSP disconnected! Reconnecting...")
                 return
+            
+            frame, frame_number = result
+            
+            # Skip if same frame (already processed)
+            if frame_number == self._last_frame_number:
+                return
+            
+            self._last_frame_number = frame_number
+            
+            # Update FPS from capture thread
+            self._count_display.update_fps(self._rtsp_thread.fps)
+            
+        else:
+            # === WEBCAM/FILE MODE (unchanged) ===
+            if self._cap is None:
+                return
+            
+            ret, frame = self._cap.read()
+            
+            if not ret:
+                if self._config.source.source_type == "video_file":
+                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    return
+                else:
+                    self._status_label.setText("Video source disconnected!")
+                    return
+        
+        if frame is None:
+            return
         
         # Run detection
         detections = self._detector.track(frame)
@@ -586,26 +646,23 @@ class CountingPage(PageBase):
             print(f"  [{direction}] Track {track_id}")
         
         # Update displays
-        self._video_display.update_frame(
-            frame, detections, 
-            {"entry": self._counter.entry_count, "exit": self._counter.exit_count},
-            self._counter
-        )
+        self._video_display.update_frame(frame, detections, self._counter)
         
         self._count_display.update_counts(
             self._counter.entry_count,
             self._counter.exit_count
         )
         
-        # Update FPS
-        self._fps_frames += 1
-        if self._fps_frames >= 20:
-            elapsed = time.time() - self._fps_time
-            if elapsed > 0:
-                self._fps = self._fps_frames / elapsed
-            self._fps_time = time.time()
-            self._fps_frames = 0
-            self._count_display.update_fps(self._fps)
+        # Update processing FPS (for webcam/file mode)
+        if not self._is_rtsp:
+            self._fps_frames += 1
+            if self._fps_frames >= 20:
+                elapsed = time.time() - self._fps_time
+                if elapsed > 0:
+                    self._process_fps = self._fps_frames / elapsed
+                self._fps_time = time.time()
+                self._fps_frames = 0
+                self._count_display.update_fps(self._process_fps)
     
     def stop(self):
         """Stop all processing."""
@@ -613,6 +670,12 @@ class CountingPage(PageBase):
         self._is_paused = False
         self._timer.stop()
         
+        # Stop RTSP thread
+        if self._rtsp_thread:
+            self._rtsp_thread.stop()
+            self._rtsp_thread = None
+        
+        # Release webcam/file capture
         if self._cap:
             self._cap.release()
             self._cap = None
