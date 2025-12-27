@@ -355,8 +355,8 @@ class ROIConfigurationPage(PageBase):
             
             self._rtsp_thread = RTSPCaptureThread(
                 rtsp_url=self._source_config.path,
-                target_width=1280,
-                target_height=720
+                max_width=1280,
+                max_height=720
             )
             
             if self._rtsp_thread.start():

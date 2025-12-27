@@ -481,8 +481,8 @@ class CountingPage(PageBase):
             
             self._rtsp_thread = RTSPCaptureThread(
                 rtsp_url=self._config.source.path,
-                target_width=1280,
-                target_height=720
+                max_width=1280,
+                max_height=720
             )
             
             if not self._rtsp_thread.start():
@@ -495,12 +495,17 @@ class CountingPage(PageBase):
             # Wait for first frame
             time.sleep(0.5)
             
-            width, height = self._rtsp_thread.target_size
+            width, height = self._rtsp_thread.output_size
             original_size = self._rtsp_thread.original_size
             
-            self._status_label.setText(
-                f"RTSP connected: {original_size[0]}×{original_size[1]} → {width}×{height}"
-            )
+            if self._rtsp_thread.is_resizing:
+                self._status_label.setText(
+                    f"RTSP: {original_size[0]}×{original_size[1]} → {width}×{height} (downscaled)"
+                )
+            else:
+                self._status_label.setText(
+                    f"RTSP: {original_size[0]}×{original_size[1]} (original, no resize)"
+                )
             
         else:
             # === WEBCAM/FILE MODE: Use direct capture (unchanged) ===
