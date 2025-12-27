@@ -1,15 +1,16 @@
 """
-ROI Configuration Page - Draw lines/polygons on live video.
+ROI Configuration Page - Draw lines/polygons on live video with direction selection.
 """
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QFrame, QComboBox, QMessageBox
+    QPushButton, QFrame, QComboBox, QMessageBox, QButtonGroup
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 import cv2
 import numpy as np
+import math
 
 from app.ui.pages.page_base import PageBase
 from app.model.data_structures import (
@@ -21,7 +22,7 @@ from app.model.data_structures import (
 class VideoCanvas(QLabel):
     """Widget for displaying video and drawing ROI."""
     
-    line_drawn = Signal(tuple, tuple)  # p1, p2
+    line_drawn = Signal(tuple, tuple)  # p1, p2 in normalized coords
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,11 +38,20 @@ class VideoCanvas(QLabel):
         self._end_point = None
         self._current_line = None  # (p1, p2) in normalized coords
         
+        # Direction: which side is entry
+        # "side_a" = left/top side of line, "side_b" = right/bottom side
+        self._entry_side = "side_a"
+        
         # Video frame
         self._current_frame = None
         self._frame_size = (640, 480)
         
         self.setMouseTracking(True)
+    
+    def set_entry_side(self, side: str):
+        """Set which side is the entry side."""
+        self._entry_side = side
+        self._update_display()
     
     def set_frame(self, frame):
         """Set current video frame."""
@@ -54,29 +64,65 @@ class VideoCanvas(QLabel):
         if self._current_frame is None:
             return
         
-        # Convert frame to QImage
         frame = self._current_frame.copy()
+        h, w = frame.shape[:2]
         
         # Draw existing line
         if self._current_line:
-            p1, p2 = self._current_line
-            p1_px = (int(p1[0] * frame.shape[1]), int(p1[1] * frame.shape[0]))
-            p2_px = (int(p2[0] * frame.shape[1]), int(p2[1] * frame.shape[0]))
+            p1_norm, p2_norm = self._current_line
+            p1_px = (int(p1_norm[0] * w), int(p1_norm[1] * h))
+            p2_px = (int(p2_norm[0] * w), int(p2_norm[1] * h))
+            
+            # Draw main line (yellow)
             cv2.line(frame, p1_px, p2_px, (0, 255, 255), 3)
             
-            # Draw direction arrow
-            mid_x = (p1_px[0] + p2_px[0]) // 2
-            mid_y = (p1_px[1] + p2_px[1]) // 2
-            cv2.arrowedLine(frame, (mid_x - 40, mid_y), (mid_x + 40, mid_y), 
-                           (0, 255, 0), 2, tipLength=0.3)
+            # Calculate perpendicular direction for labels
+            dx = p2_px[0] - p1_px[0]
+            dy = p2_px[1] - p1_px[1]
+            length = math.sqrt(dx*dx + dy*dy)
             
-            # Labels
-            cv2.putText(frame, "ENTRY", (50, frame.shape[0]//2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.putText(frame, "EXIT", (frame.shape[1] - 100, frame.shape[0]//2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            if length > 0:
+                # Perpendicular unit vector (rotated 90 degrees)
+                perp_x = -dy / length
+                perp_y = dx / length
+                
+                # Midpoint of line
+                mid_x = (p1_px[0] + p2_px[0]) // 2
+                mid_y = (p1_px[1] + p2_px[1]) // 2
+                
+                # Label positions (offset from line)
+                offset = 60
+                side_a_x = int(mid_x + perp_x * offset)
+                side_a_y = int(mid_y + perp_y * offset)
+                side_b_x = int(mid_x - perp_x * offset)
+                side_b_y = int(mid_y - perp_y * offset)
+                
+                # Determine entry/exit labels based on selection
+                if self._entry_side == "side_a":
+                    entry_pos = (side_a_x, side_a_y)
+                    exit_pos = (side_b_x, side_b_y)
+                else:
+                    entry_pos = (side_b_x, side_b_y)
+                    exit_pos = (side_a_x, side_a_y)
+                
+                # Draw ENTRY label (green)
+                cv2.putText(frame, "ENTRY", (entry_pos[0] - 40, entry_pos[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                
+                # Draw EXIT label (red)
+                cv2.putText(frame, "EXIT", (exit_pos[0] - 30, exit_pos[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                
+                # Draw arrow from entry side to exit side
+                arrow_start_x = int(mid_x + perp_x * 25 * (1 if self._entry_side == "side_a" else -1))
+                arrow_start_y = int(mid_y + perp_y * 25 * (1 if self._entry_side == "side_a" else -1))
+                arrow_end_x = int(mid_x - perp_x * 25 * (1 if self._entry_side == "side_a" else -1))
+                arrow_end_y = int(mid_y - perp_y * 25 * (1 if self._entry_side == "side_a" else -1))
+                
+                cv2.arrowedLine(frame, (arrow_start_x, arrow_start_y), 
+                               (arrow_end_x, arrow_end_y), (0, 255, 0), 3, tipLength=0.4)
         
-        # Draw line being drawn
+        # Draw line being drawn (preview)
         if self._drawing and self._start_point and self._end_point:
             cv2.line(frame, self._start_point, self._end_point, (255, 255, 0), 2)
         
@@ -86,7 +132,7 @@ class VideoCanvas(QLabel):
         bytes_per_line = ch * w
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
         
-        # Scale to fit label while maintaining aspect ratio
+        # Scale to fit label
         pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.setPixmap(scaled)
@@ -96,7 +142,6 @@ class VideoCanvas(QLabel):
         if self._current_frame is None:
             return (0, 0)
         
-        # Get the pixmap rect (centered in label)
         pixmap = self.pixmap()
         if pixmap is None:
             return (0, 0)
@@ -161,11 +206,16 @@ class VideoCanvas(QLabel):
         self._current_line = None
         self._start_point = None
         self._end_point = None
+        self._entry_side = "side_a"
         self._update_display()
     
     def get_line(self):
         """Get current line in normalized coordinates."""
         return self._current_line
+    
+    def get_entry_side(self):
+        """Get selected entry side."""
+        return self._entry_side
 
 
 class ROIConfigurationPage(PageBase):
@@ -189,9 +239,13 @@ class ROIConfigurationPage(PageBase):
         """Setup page content."""
         # Instructions
         self._instructions = QLabel(
-            "Draw a vertical line on the video. People crossing LEFT→RIGHT = Entry, RIGHT→LEFT = Exit"
+            "Step 1: Draw a line across the path where people will cross.\n"
+            "Step 2: Select which side people ENTER from."
         )
-        self._instructions.setStyleSheet("color: #0066cc; font-size: 12px; padding: 5px; background: #e7f1ff; border-radius: 4px;")
+        self._instructions.setStyleSheet(
+            "color: #0066cc; font-size: 12px; padding: 10px; "
+            "background: #e7f1ff; border-radius: 4px;"
+        )
         self._instructions.setWordWrap(True)
         self.add_content(self._instructions)
         
@@ -200,11 +254,55 @@ class ROIConfigurationPage(PageBase):
         self._canvas.line_drawn.connect(self._on_line_drawn)
         self.add_content(self._canvas)
         
+        # Direction selection (hidden until line is drawn)
+        self._direction_frame = QFrame()
+        self._direction_frame.setStyleSheet(
+            "QFrame { background-color: #fff3cd; border-radius: 4px; padding: 10px; }"
+        )
+        self._direction_frame.setVisible(False)
+        
+        direction_layout = QHBoxLayout(self._direction_frame)
+        
+        direction_label = QLabel("Entry comes from:")
+        direction_label.setStyleSheet("font-weight: bold;")
+        direction_layout.addWidget(direction_label)
+        
+        self._direction_group = QButtonGroup(self)
+        
+        self._side_a_btn = QPushButton("◀ This Side (Green)")
+        self._side_a_btn.setCheckable(True)
+        self._side_a_btn.setChecked(True)
+        self._side_a_btn.setStyleSheet("""
+            QPushButton { background-color: #d4edda; border: 2px solid #28a745; }
+            QPushButton:checked { background-color: #28a745; color: white; }
+        """)
+        self._direction_group.addButton(self._side_a_btn, 0)
+        direction_layout.addWidget(self._side_a_btn)
+        
+        self._side_b_btn = QPushButton("This Side (Green) ▶")
+        self._side_b_btn.setCheckable(True)
+        self._side_b_btn.setStyleSheet("""
+            QPushButton { background-color: #d4edda; border: 2px solid #28a745; }
+            QPushButton:checked { background-color: #28a745; color: white; }
+        """)
+        self._direction_group.addButton(self._side_b_btn, 1)
+        direction_layout.addWidget(self._side_b_btn)
+        
+        self._swap_btn = QPushButton("⇄ Swap Direction")
+        self._swap_btn.clicked.connect(self._swap_direction)
+        direction_layout.addWidget(self._swap_btn)
+        
+        direction_layout.addStretch()
+        
+        self._direction_group.buttonClicked.connect(self._on_direction_changed)
+        
+        self.add_content(self._direction_frame)
+        
         # Drawing controls
         controls_layout = QHBoxLayout()
         
-        self._clear_btn = QPushButton("Clear Drawing")
-        self._clear_btn.clicked.connect(self._canvas.clear_drawing)
+        self._clear_btn = QPushButton("✕ Clear & Redraw")
+        self._clear_btn.clicked.connect(self._clear_drawing)
         controls_layout.addWidget(self._clear_btn)
         
         controls_layout.addStretch()
@@ -227,6 +325,12 @@ class ROIConfigurationPage(PageBase):
         self._module_type = module_type
         self._source_config = source_config
         self._model_config = model_config
+        
+        # Reset state
+        self._canvas.clear_drawing()
+        self._direction_frame.setVisible(False)
+        self._next_btn.setEnabled(False)
+        self._status_label.setText("Draw a line to continue")
         
         # Start video capture
         self._start_video()
@@ -264,9 +368,38 @@ class ROIConfigurationPage(PageBase):
     
     def _on_line_drawn(self, p1, p2):
         """Handle line drawn."""
-        self._status_label.setText("✓ Line configured")
+        self._direction_frame.setVisible(True)
+        self._status_label.setText("✓ Line drawn - select entry direction")
         self._status_label.setStyleSheet("color: green; font-weight: bold;")
         self._next_btn.setEnabled(True)
+        
+        # Reset direction to default
+        self._side_a_btn.setChecked(True)
+        self._canvas.set_entry_side("side_a")
+    
+    def _on_direction_changed(self, button):
+        """Handle direction selection change."""
+        if button == self._side_a_btn:
+            self._canvas.set_entry_side("side_a")
+        else:
+            self._canvas.set_entry_side("side_b")
+    
+    def _swap_direction(self):
+        """Swap entry/exit direction."""
+        if self._side_a_btn.isChecked():
+            self._side_b_btn.setChecked(True)
+            self._canvas.set_entry_side("side_b")
+        else:
+            self._side_a_btn.setChecked(True)
+            self._canvas.set_entry_side("side_a")
+    
+    def _clear_drawing(self):
+        """Clear drawing and reset."""
+        self._canvas.clear_drawing()
+        self._direction_frame.setVisible(False)
+        self._next_btn.setEnabled(False)
+        self._status_label.setText("Draw a line to continue")
+        self._status_label.setStyleSheet("color: #666;")
     
     def _on_next(self):
         """Handle next button."""
@@ -282,6 +415,9 @@ class ROIConfigurationPage(PageBase):
             self._cap.release()
             self._cap = None
         
+        # Determine entry direction based on selection
+        entry_side = self._canvas.get_entry_side()
+        
         # Create ROI config
         p1, p2 = line
         roi_config = ROIConfiguration(
@@ -290,7 +426,7 @@ class ROIConfigurationPage(PageBase):
                 id="main_line",
                 p1=p1,
                 p2=p2,
-                entry_direction="left_to_right"
+                entry_direction=entry_side  # "side_a" or "side_b"
             )],
             debounce=DebounceConfig(
                 hysteresis_distance=25,

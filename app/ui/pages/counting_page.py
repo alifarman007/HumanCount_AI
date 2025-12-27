@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage, QPixmap, QFont
 import cv2
 import numpy as np
 import time
+import math
 
 from app.ui.pages.page_base import PageBase
 from app.model.data_structures import AppConfiguration, CountDirection
@@ -63,7 +64,7 @@ class CountDisplay(QFrame):
         
         self._entry_value = QLabel("0")
         self._entry_value.setAlignment(Qt.AlignCenter)
-        self._entry_value.setFont(QFont("Arial", 36, QFont.Bold))
+        self._entry_value.setFont(QFont("Arial", 24, QFont.Bold))
         self._entry_value.setStyleSheet("color: #00ff00;")
         entry_layout.addWidget(self._entry_value)
         
@@ -81,7 +82,7 @@ class CountDisplay(QFrame):
         
         self._exit_value = QLabel("0")
         self._exit_value.setAlignment(Qt.AlignCenter)
-        self._exit_value.setFont(QFont("Arial", 36, QFont.Bold))
+        self._exit_value.setFont(QFont("Arial", 24, QFont.Bold))
         self._exit_value.setStyleSheet("color: #ff4444;")
         exit_layout.addWidget(self._exit_value)
         
@@ -105,7 +106,7 @@ class CountDisplay(QFrame):
         
         self._inside_value = QLabel("0")
         self._inside_value.setAlignment(Qt.AlignCenter)
-        self._inside_value.setFont(QFont("Arial", 42, QFont.Bold))
+        self._inside_value.setFont(QFont("Arial", 28, QFont.Bold))
         self._inside_value.setStyleSheet("color: #ffffff;")
         inside_layout.addWidget(self._inside_value)
         
@@ -159,46 +160,62 @@ class VideoDisplay(QLabel):
         
         self._frame_size = (frame.shape[1], frame.shape[0])
         frame = frame.copy()
+        h, w = frame.shape[:2]
         
         # Draw tripwire line
         if self._line_config:
-            h, w = frame.shape[:2]
             p1 = (int(self._line_config.p1[0] * w), int(self._line_config.p1[1] * h))
             p2 = (int(self._line_config.p2[0] * w), int(self._line_config.p2[1] * h))
             
-            # Draw line
+            # Draw line (yellow)
             cv2.line(frame, p1, p2, (0, 255, 255), 3)
             
-            # Draw hysteresis zone
-            line_x = (p1[0] + p2[0]) // 2
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (line_x - 25, 0), (line_x + 25, h), (0, 255, 255), -1)
-            cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
+            # Calculate perpendicular for labels
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            length = math.sqrt(dx*dx + dy*dy)
             
-            # Direction labels
-            cv2.putText(frame, "ENTRY", (30, h//2 - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, "EXIT", (w - 80, h//2 - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if length > 0:
+                perp_x = -dy / length
+                perp_y = dx / length
+                
+                mid_x = (p1[0] + p2[0]) // 2
+                mid_y = (p1[1] + p2[1]) // 2
+                
+                # Label positions
+                offset = 50
+                side_a_pos = (int(mid_x + perp_x * offset), int(mid_y + perp_y * offset))
+                side_b_pos = (int(mid_x - perp_x * offset), int(mid_y - perp_y * offset))
+                
+                # Determine which side is entry based on config
+                entry_side = getattr(self._line_config, 'entry_direction', 'side_a')
+                
+                if entry_side == "side_a":
+                    entry_pos, exit_pos = side_a_pos, side_b_pos
+                else:
+                    entry_pos, exit_pos = side_b_pos, side_a_pos
+                
+                # Draw labels
+                cv2.putText(frame, "ENTRY", (entry_pos[0] - 35, entry_pos[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(frame, "EXIT", (exit_pos[0] - 25, exit_pos[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
         # Draw detections
         for det in detections:
             x1, y1, x2, y2 = map(int, det.bbox)
             bc_x, bc_y = int(det.bottom_center[0]), int(det.bottom_center[1])
             
-            # Determine color based on position
-            if self._line_config:
-                h, w = frame.shape[:2]
-                line_x = int((self._line_config.p1[0] + self._line_config.p2[0]) / 2 * w)
-                
-                if bc_x < line_x - 25:
+            # Determine color based on side
+            color = (0, 255, 0)  # Default green
+            if counter and hasattr(counter, 'get_side'):
+                side = counter.get_side((bc_x, bc_y))
+                if side == "center":
+                    color = (0, 255, 255)  # Yellow - crossing zone
+                elif side == counter.entry_side:
                     color = (0, 255, 0)  # Green - entry side
-                elif bc_x > line_x + 25:
-                    color = (0, 0, 255)  # Red - exit side
                 else:
-                    color = (0, 255, 255)  # Yellow - crossing
-            else:
-                color = (0, 255, 0)
+                    color = (0, 0, 255)  # Red - exit side
             
             # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -225,25 +242,75 @@ class VideoDisplay(QLabel):
 
 
 class SimpleCounter:
-    """Simple tripwire counter logic."""
+    """
+    Simple tripwire counter logic that works with any line orientation.
+    Uses cross product to determine which side of the line a point is on.
+    """
     
-    def __init__(self, line_x: int, hysteresis: int = 25, cooldown: int = 25):
-        self.line_x = line_x
+    def __init__(self, line_p1: tuple, line_p2: tuple, entry_side: str = "side_a", 
+                 hysteresis: float = 25, cooldown: int = 25):
+        """
+        Initialize counter.
+        
+        Args:
+            line_p1: First point of line (x, y) in pixels
+            line_p2: Second point of line (x, y) in pixels
+            entry_side: Which side is entry ("side_a" or "side_b")
+            hysteresis: Distance from line before side change registers
+            cooldown: Frames to wait before same track can count again
+        """
+        self.line_p1 = line_p1
+        self.line_p2 = line_p2
+        self.entry_side = entry_side
         self.hysteresis = hysteresis
         self.cooldown = cooldown
         
         self.entry_count = 0
         self.exit_count = 0
         self.track_states = {}
+        
+        # Calculate line length for distance normalization
+        dx = line_p2[0] - line_p1[0]
+        dy = line_p2[1] - line_p1[1]
+        self.line_length = math.sqrt(dx*dx + dy*dy)
     
-    def get_side(self, x: float) -> str:
-        if x < self.line_x - self.hysteresis:
-            return "left"
-        elif x > self.line_x + self.hysteresis:
-            return "right"
-        return "center"
+    def _cross_product(self, point: tuple) -> float:
+        """
+        Calculate cross product to determine which side of line the point is on.
+        
+        Returns:
+            Positive = "side_a" (left of line direction)
+            Negative = "side_b" (right of line direction)
+        """
+        x, y = point
+        x1, y1 = self.line_p1
+        x2, y2 = self.line_p2
+        
+        return (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+    
+    def _get_distance_from_line(self, point: tuple) -> float:
+        """Get perpendicular distance from point to line."""
+        if self.line_length == 0:
+            return 0
+        return abs(self._cross_product(point)) / self.line_length
+    
+    def get_side(self, point: tuple) -> str:
+        """
+        Determine which side of the line a point is on.
+        
+        Returns:
+            "side_a", "side_b", or "center" (within hysteresis zone)
+        """
+        distance = self._get_distance_from_line(point)
+        
+        if distance < self.hysteresis:
+            return "center"
+        
+        cross = self._cross_product(point)
+        return "side_a" if cross > 0 else "side_b"
     
     def process(self, detections: list) -> list:
+        """Process detections and return crossing events."""
         events = []
         seen_ids = set()
         
@@ -253,8 +320,8 @@ class SimpleCounter:
                 continue
             
             seen_ids.add(track_id)
-            x = det.bottom_center[0]
-            current_side = self.get_side(x)
+            point = det.bottom_center
+            current_side = self.get_side(point)
             
             if current_side == "center":
                 continue
@@ -272,20 +339,24 @@ class SimpleCounter:
             previous_side = state["side"]
             
             if previous_side != current_side:
-                if previous_side == "left" and current_side == "right":
+                # Crossing detected!
+                # Determine if entry or exit based on configured entry_side
+                if previous_side == self.entry_side:
+                    # Moving FROM entry side TO exit side = ENTRY
                     self.entry_count += 1
                     events.append({"track_id": track_id, "direction": "entry"})
-                    state["cooldown"] = self.cooldown
-                elif previous_side == "right" and current_side == "left":
+                else:
+                    # Moving FROM exit side TO entry side = EXIT
                     self.exit_count += 1
                     events.append({"track_id": track_id, "direction": "exit"})
-                    state["cooldown"] = self.cooldown
                 
+                state["cooldown"] = self.cooldown
                 state["side"] = current_side
         
         return events
     
     def reset(self):
+        """Reset counts and states."""
         self.entry_count = 0
         self.exit_count = 0
         self.track_states.clear()
@@ -325,7 +396,8 @@ class CountingPage(PageBase):
         
         # Stats panel (right side)
         self._count_display = CountDisplay()
-        self._count_display.setFixedWidth(200)
+        self._count_display.setMinimumWidth(160)
+        self._count_display.setMaximumWidth(220)
         main_layout.addWidget(self._count_display)
         
         container = QWidget()
@@ -417,15 +489,33 @@ class CountingPage(PageBase):
             return
         
         # Get frame dimensions for counter
-        width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        
         
         # Initialize counter
+        width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
         if self._config.roi and self._config.roi.lines:
             line = self._config.roi.lines[0]
-            line_x = int((line.p1[0] + line.p2[0]) / 2 * width)
-            self._counter = SimpleCounter(line_x=line_x, hysteresis=25, cooldown=25)
+            # Convert normalized coords to pixels
+            p1 = (line.p1[0] * width, line.p1[1] * height)
+            p2 = (line.p2[0] * width, line.p2[1] * height)
+            entry_side = line.entry_direction  # "side_a" or "side_b"
+            
+            self._counter = SimpleCounter(
+                line_p1=p1, 
+                line_p2=p2, 
+                entry_side=entry_side,
+                hysteresis=25, 
+                cooldown=25
+            )
         else:
-            self._counter = SimpleCounter(line_x=width // 2)
+            # Default vertical line in center
+            self._counter = SimpleCounter(
+                line_p1=(width // 2, 0),
+                line_p2=(width // 2, height),
+                entry_side="side_a"
+            )
         
         # Update UI
         self._is_running = True
