@@ -182,8 +182,8 @@ class ModuleSelectionPage(PageBase):
         
         self.add_content(scroll)
         
-        # Connect button group
-        self._button_group.buttonClicked.connect(self._on_selection_changed)
+        # Connect button group - use idToggled to catch programmatic changes too
+        self._button_group.idToggled.connect(self._on_selection_toggled)
         
         # Buttons
         self.add_button_stretch()
@@ -193,14 +193,13 @@ class ModuleSelectionPage(PageBase):
         
         # Select first by default
         self._cards[0].radio.setChecked(True)
-        self._on_selection_changed(self._cards[0].radio)
-    
-    def _on_selection_changed(self, button):
-        """Handle selection change."""
-        idx = self._button_group.id(button)
-        if idx >= 0:
-            self._selected_type = MODULES[idx]["type"]
+        
+    def _on_selection_toggled(self, id: int, checked: bool):
+        """Handle selection toggle."""
+        if checked and id >= 0:
+            self._selected_type = MODULES[id]["type"]
             self._next_btn.setEnabled(True)
+            print(f"[ModuleSelection] Selected: {self._selected_type}")  # DEBUG
     
     def _on_next(self):
         """Handle next button click."""

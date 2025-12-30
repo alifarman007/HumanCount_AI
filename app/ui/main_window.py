@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_module_selected(self, module_type: str):
         """Handle module selection."""
+        print(f"[MainWindow] Module selected: {module_type}")  # DEBUG
         self._config.module_type = module_type
         self._go_to_page(self.PAGE_SOURCE_SELECT)
     
@@ -118,6 +119,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_model_configured(self, model_config):
         """Handle model configuration."""
+        print(f"[MainWindow] Model configured, module_type is: {self._config.module_type}")  # DEBUG
         self._config.model = model_config
         
         # Pass config to ROI page
@@ -132,12 +134,18 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_roi_configured(self, roi_config):
         """Handle ROI configuration."""
+        print(f"[MainWindow] ROI configured received!")  # DEBUG
         self._config.roi = roi_config
         
-        # Pass full config to counting page
-        self._counting_page.set_configuration(self._config)
+        # Set configuration on counting page
+        self._counting_page.set_configuration(
+            source_config=self._config.source,
+            model_config=self._config.model,
+            roi_config=self._config.roi
+        )
         
         self._go_to_page(self.PAGE_COUNTING)
+        print(f"[MainWindow] Navigated to counting page")  # DEBUG
     
     @Slot()
     def _on_back_from_counting(self):
