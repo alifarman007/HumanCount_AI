@@ -680,7 +680,7 @@ class CountingPage(PageBase):
                 segments_data[seg_idx] = current_side
                 
                 # IMPORTANT: Return immediately after counting to prevent double-count
-                returns
+                return
     
     def _cross_product(self, p1: tuple, p2: tuple, point: tuple) -> float:
         """Calculate cross product for point relative to line."""
